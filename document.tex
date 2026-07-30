@@ -1,0 +1,29 @@
+\documentclass[11pt]{article}
+
+% --- Layout & fonts (Computer Modern default) ---
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+
+% --- Teal accent styling (matches Nadim's standard doc style) ---
+\usepackage{xcolor}
+\definecolor{accentteal}{RGB}{0,112,112}
+\usepackage{titlesec}
+\titleformat{\section}
+  {\normalfont\Large\bfseries\color{accentteal}}{\thesection}{1em}{}
+\titlespacing*{\section}{0pt}{1.4em}{0.8em}
+
+\usepackage{enumitem}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, urlcolor=accentteal, linkcolor=accentteal}
+\usepackage{parskip}
+
+\title{\textcolor{accentteal}{\textbf{ {{ title }} }}}
+\author{ {{ author }} }
+\date{ {{ date }} }
+
+\begin{document}
+\maketitle
+
+{{ body }}
+
+\end{document}
