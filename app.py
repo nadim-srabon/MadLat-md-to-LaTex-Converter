@@ -19,7 +19,9 @@ import uuid
 from datetime import date
 from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+import shutil
+
+from fastapi import BackgroundTasks, FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
 from jinja2 import Environment, FileSystemLoader
 from pypdf import PdfReader
@@ -29,8 +31,10 @@ from prompts import PROMPT_STYLES
 
 APP_DIR = Path(__file__).resolve().parent
 TEMPLATE_DIR = APP_DIR / "templates"
-OUTPUT_DIR = APP_DIR / "output"
-OUTPUT_DIR.mkdir(exist_ok=True)
+# Use the system temp dir (always writable regardless of container user) rather
+# than a folder inside the app directory -- WORKDIR is created by Docker as root,
+# so only files explicitly COPY --chown'd are owned by the app user, not new
+# subdirectories created at runtime.
 
 MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5")
 ACCESS_CODE = os.environ.get("ACCESS_CODE")  # None = no gate (not recommended publicly)
@@ -75,22 +79,22 @@ def render_latex(body: str, title: str, author: str) -> str:
 
 
 def compile_pdf(tex_content: str, out_name: str) -> Path:
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_path = Path(tmp)
-        tex_file = tmp_path / f"{out_name}.tex"
-        tex_file.write_text(tex_content, encoding="utf-8")
-        for _ in range(2):
-            result = subprocess.run(
-                ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", tex_file.name],
-                cwd=tmp_path, capture_output=True, text=True,
-            )
-        if result.returncode != 0:
-            log_tail = "\n".join(result.stdout.splitlines()[-30:])
-            raise HTTPException(500, f"LaTeX compilation failed:\n{log_tail}")
-        produced = tmp_path / f"{out_name}.pdf"
-        final_path = OUTPUT_DIR / f"{out_name}.pdf"
-        final_path.write_bytes(produced.read_bytes())
-        return final_path
+    # Each request gets its own temp dir in the system temp location (e.g. /tmp),
+    # which is writable by any user. Caller is responsible for cleaning it up
+    # after the response is sent (see the BackgroundTasks usage below).
+    tmp_path = Path(tempfile.mkdtemp(prefix="latex-agent-"))
+    tex_file = tmp_path / f"{out_name}.tex"
+    tex_file.write_text(tex_content, encoding="utf-8")
+    for _ in range(2):
+        result = subprocess.run(
+            ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", tex_file.name],
+            cwd=tmp_path, capture_output=True, text=True,
+        )
+    if result.returncode != 0:
+        log_tail = "\n".join(result.stdout.splitlines()[-30:])
+        shutil.rmtree(tmp_path, ignore_errors=True)
+        raise HTTPException(500, f"LaTeX compilation failed:\n{log_tail}")
+    return tmp_path / f"{out_name}.pdf"
 
 
 def check_access(access_code: str | None):
@@ -121,6 +125,7 @@ def index():
 
 @app.post("/summarize")
 def summarize_endpoint(
+    background_tasks: BackgroundTasks,
     file: UploadFile | None = File(None),
     text: str | None = Form(None),
     title: str = Form("Summary"),
@@ -140,7 +145,11 @@ def summarize_endpoint(
     out_name = f"summary-{uuid.uuid4().hex[:8]}"
     pdf_path = compile_pdf(tex_content, out_name)
 
-    return FileResponse(pdf_path, media_type="application/pdf", filename=f"{title}.pdf")
+    # Delete the temp dir once the response has finished sending
+    background_tasks.add_task(shutil.rmtree, pdf_path.parent, ignore_errors=True)
+
+    return FileResponse(pdf_path, media_type="application/pdf", filename=f"{title}.pdf",
+                         background=background_tasks)
 
 
 @app.get("/health")
